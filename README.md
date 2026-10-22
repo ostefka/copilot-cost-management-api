@@ -48,6 +48,8 @@ Also observed:
 - **App-only tokens are refused** (403 on `getTenantCreditBalance()` and `spendingPolicies` with a client-credentials
   token). Only delegated access works today — see [Running it unattended](#running-it-unattended).
 - **There is no tenant-wide per-user list:** `GET /userBalances` returns 404. Per-user data is one call per user.
+- **`serviceBalances` is paged at 10 items.** The lab user had 11 services, so the 11th came only by following
+  `@odata.nextLink`. Always follow it, unchanged.
 - `$select` works on `/spendingPolicies`; `$top=1` was accepted (the preview guide lists `$top` as a known issue, and
   the lab had only one policy, so paging could not be verified).
 - No 429s in roughly 300 requests sent one at a time, two seconds apart.
@@ -113,9 +115,9 @@ pay-as-you-go. Lab values: 57,000 prepaid credits purchased, 2,060.57 consumed, 
 **Per-user, per-service balance** (`serviceBalances`) — `consumedQuantity`, `isConsumptionAllowed`,
 `accessDecisionReason` (`allowed`, `notEntitled`, `limitExhausted`), the governing `spendingPolicyId`, configured and
 effective limits, `remainingQuantity` and `dataStatus`. `/userBalances/{id}` adds `selectionDataStatus`
-(`evaluatedDateTime`, `usageAsOfDateTime`) and `unevaluatedServices`. Services seen: `cowork`, `workIQ`,
+(`evaluatedDateTime`, `usageAsOfDateTime`) and `unevaluatedServices`. The lab user had 11 services (two pages), among them `cowork`, `workIQ`,
 `copilotCode`, `m365CopilotChatAdvancedWork`, `researcherCritiqueAndCouncil`, `outlook`, `opal`, `scout`,
-`teamsInterpreter`, `teamsPhoneAgent`.
+`teamsInterpreter` and `teamsPhoneAgent`.
 
 **Policies** — limits, billing method, status (`enabled`, `disabled`, `provisioning`, `provisioningFailed`) and per-service
 settings; the lab's all-users policy listed 32 services, including Copilot Studio, Microsoft Fabric, GitHub Copilot,

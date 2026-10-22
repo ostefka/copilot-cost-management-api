@@ -82,7 +82,7 @@ def _run():
     g = Graph(t["access_token"])
     bal = g.call("GET", "/getTenantCreditBalance()")
     pols = g.call("GET", "/spendingPolicies")
-    svc = g.call("GET", f"/userBalances/{c['oid']}/serviceBalances")
+    services, svc = g.list_all(f"/userBalances/{c['oid']}/serviceBalances")  # pages of 10
     record({
         "ts": now(), "ok": all(x["status"] == 200 for x in (bal, pols, svc)), "hours_since_signin": age_h,
         "refresh_number": st["refreshes"], "refresh_token_rotated": rotated,
@@ -92,7 +92,8 @@ def _run():
                            | {"asOf": b.get("dataStatus", {}).get("lastModifiedDateTime")}
                            for b in (bal["body"] or {}).get("billingMethodBalances", [])] if bal["status"] == 200 else None,
         "policies": len((pols["body"] or {}).get("value", [])) if pols["status"] == 200 else None,
-        "my_consumption": {s["serviceId"]: s["consumedQuantity"] for s in (svc["body"] or {}).get("value", [])
+        "services": len(services),
+        "my_consumption": {s["serviceId"]: s["consumedQuantity"] for s in services
                            if s["consumedQuantity"]} if svc["status"] == 200 else None,
     })
 

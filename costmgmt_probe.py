@@ -47,11 +47,11 @@ def main():
             for sid in service_ids(g.list_all(f"{pol}/serviceSettings")[0]):
                 g.call("GET", f"{pol}/serviceSettings/{sid}")
             g.call("GET", f"{pol}/emailThresholdSettings")
-            g.call("GET", f"{pol}/emailThresholdSettings/recipients")
-            g.call("GET", f"{pol}/emailThresholdSettings/recipients/$ref")
+            g.list_all(f"{pol}/emailThresholdSettings/recipients")
+            g.list_all(f"{pol}/emailThresholdSettings/recipients/$ref")
             if "selectedGroups" in p.get("@odata.type", ""):
-                g.call("GET", f"{pol}/microsoft.graph.selectedGroupsSpendingPolicy/assignedGroups")
-                g.call("GET", f"{pol}/microsoft.graph.selectedGroupsSpendingPolicy/assignedGroups/$ref")
+                g.list_all(f"{pol}/microsoft.graph.selectedGroupsSpendingPolicy/assignedGroups")
+                g.list_all(f"{pol}/microsoft.graph.selectedGroupsSpendingPolicy/assignedGroups/$ref")
 
     os.makedirs("results", exist_ok=True)
     path = f"results/{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json"
