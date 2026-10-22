@@ -34,7 +34,7 @@ def service_ids(body):
 def post_form(url, data):
     req = urllib.request.Request(url, urllib.parse.urlencode(data).encode())
     try:
-        with urllib.request.urlopen(req) as r:
+        with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
         return json.load(e)
@@ -71,7 +71,7 @@ def get(url, token, tries=5):
     for _ in range(tries):
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
         try:
-            with urllib.request.urlopen(req) as r:
+            with urllib.request.urlopen(req, timeout=30) as r:
                 return {"status": r.status, "request_id": r.headers.get("request-id"), "body": json.load(r)}
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")

@@ -1,6 +1,6 @@
 """Shared helpers: Entra device-code / refresh-token sign-in and a paced Microsoft Graph client.
 Standard library only. Tokens are never printed."""
-import base64, json, os, sys, time, urllib.error, urllib.parse, urllib.request
+import base64, email.utils, json, os, sys, tempfile, time, urllib.error, urllib.parse, urllib.request
 
 GRAPH = "https://graph.microsoft.com"
 BASE = f"{GRAPH}/beta/copilot/costManagement"
@@ -9,15 +9,22 @@ SCOPE = lambda name: f"{GRAPH}/{name}"
 READ_SCOPES = [SCOPE(s) for s in (
     "CopilotCostManagement.Read.All", "CopilotCostManagement-Policy.Read.All",
     "CopilotCostManagement-UserData.Read.All", "CopilotCostManagement-Assignment.Read.All")]
+TIMEOUT = 30  # seconds per HTTP request
 
 
 def _post_form(url, data):
+    """POST a form to Entra. Network or parse failures come back as an OAuth-style error, never an exception."""
     req = urllib.request.Request(url, urllib.parse.urlencode(data).encode())
     try:
-        with urllib.request.urlopen(req) as r:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
-        return json.load(e)
+        try:
+            return json.load(e)
+        except ValueError:
+            return {"error": f"http_{e.code}", "error_description": "non-JSON error response"}
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        return {"error": "network_error", "error_description": str(e)}
 
 
 def claims(token):
@@ -54,11 +61,36 @@ def refresh(tenant, client_id, refresh_token, scopes):
 
 
 def write_private(path, obj):
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(obj, f)
-    os.replace(path + ".tmp", path)
+    """Atomically replace path with obj as JSON, mode 0600, flushed to disk."""
+    d = os.path.dirname(path)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")  # unique name, created 0600
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+    dfd = os.open(d, os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def retry_after(value, default):
+    """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date), capped at 5 minutes."""
+    try:
+        wait = int(value)
+    except (TypeError, ValueError):
+        try:
+            wait = email.utils.parsedate_to_datetime(value).timestamp() - time.time()
+        except (TypeError, ValueError):
+            wait = default
+    return max(1, min(int(wait), 300))
 
 
 def check_token(token, tenant):
@@ -77,7 +109,7 @@ class Graph:
     def call(self, method, url, body=None, headers=None, label=None):
         url = url if url.startswith("http") else BASE + url
         url = urllib.parse.quote(url, safe=":/?&=$,@'()+%")
-        h ={"Authorization": f"Bearer {self.token}", **(headers or {})}
+        h = {"Authorization": f"Bearer {self.token}", **(headers or {})}
         data = None
         if body is not None:
             data, h["Content-Type"] = json.dumps(body).encode(), "application/json"
@@ -85,18 +117,20 @@ class Graph:
         for _ in range(6):
             req = urllib.request.Request(url, data=data, headers=h, method=method)
             try:
-                with urllib.request.urlopen(req) as r:
+                with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
                     raw = r.read().decode()
                     status, rid = r.status, r.headers.get("request-id")
                     etag = r.headers.get("ETag")
             except urllib.error.HTTPError as e:
                 raw, status, rid, etag = e.read().decode(errors="replace"), e.code, e.headers.get("request-id"), None
                 if status == 429:
-                    wait = int(e.headers.get("Retry-After") or delay)
+                    wait = retry_after(e.headers.get("Retry-After"), delay)
                     print(f"  429, waiting {wait}s", flush=True)
                     time.sleep(wait)
                     delay *= 2
                     continue
+            except (urllib.error.URLError, TimeoutError) as e:
+                raw, status, rid, etag = json.dumps({"error": {"message": f"network error: {e}"}}), 0, None, None
             break
         try:
             parsed = json.loads(raw) if raw else None
@@ -109,3 +143,14 @@ class Graph:
         print(f"{status} {method:6} {url.replace(BASE, '')}  {label or ''} {err[:160]}", flush=True)
         time.sleep(self.pause)
         return entry
+
+    def list_all(self, url, label=None):
+        """GET a collection and every @odata.nextLink page. Returns (items, last entry); stops at the first failure."""
+        items, entry = [], None
+        while url:
+            entry = self.call("GET", url, label=label)
+            if entry["status"] != 200 or not isinstance(entry["body"], dict):
+                break
+            items += entry["body"].get("value", [])
+            url = entry["body"].get("@odata.nextLink")
+        return items, entry

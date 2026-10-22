@@ -8,12 +8,13 @@ The refresh token lives in ~/.cache/costmgmt-collector/token.json (0600), never 
 Each run appends one line to collector-data/runs.jsonl: whether the refresh worked, whether the
 token rotated, how long since the interactive sign-in, and the cost figures read.
 """
-import json, os, sys, time
+import fcntl, json, os, sys, time
 from datetime import datetime, timezone
 from cmapi import READ_SCOPES, Graph, check_token, device_code, refresh, write_private
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN = os.path.expanduser("~/.cache/costmgmt-collector/token.json")
+LOCK = TOKEN + ".lock"
 APP = os.path.expanduser("~/.cache/costmgmt/app.json")
 OUT = os.path.join(HERE, "collector-data", "runs.jsonl")
 SCOPES = READ_SCOPES + ["offline_access"]
@@ -44,6 +45,17 @@ def bootstrap():
 
 
 def run():
+    # one run at a time: an overlapping run would redeem the same refresh token and race on the file
+    os.makedirs(os.path.dirname(LOCK), mode=0o700, exist_ok=True)
+    with open(LOCK, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit("another collector run is in progress")
+        _run()
+
+
+def _run():
     with open(TOKEN) as f:
         st = json.load(f)
     age_h = round((time.time() - st["bootstrapped_at"]) / 3600, 2)
@@ -53,8 +65,11 @@ def run():
         record({"ts": now(), "ok": False, "hours_since_signin": age_h, "error": t.get("error"),
                 "error_codes": t.get("error_codes"), "description": (t.get("error_description") or "")[:300]})
         sys.exit(1)
-    rotated = t.get("refresh_token") not in (None, st["refresh_token"])
-    st.update(refresh_token=t.get("refresh_token", st["refresh_token"]), refreshes=st["refreshes"] + 1, last_ok=time.time())
+    new = t.get("refresh_token")
+    rotated = isinstance(new, str) and bool(new) and new != st["refresh_token"]
+    if rotated:  # keep the previous token unless Entra returned a usable new one
+        st["refresh_token"] = new
+    st.update(refreshes=st["refreshes"] + 1, last_ok=time.time())
     write_private(TOKEN, st)  # save the rotated token before anything else can fail
     c = check_token(t["access_token"], st["tenant"])
     g = Graph(t["access_token"])

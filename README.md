@@ -101,9 +101,9 @@ Assign with `{"@odata.id": "https://graph.microsoft.com/beta/groups/{id}"}` (a `
 Enabling with no recipient fails (`"At least one alert recipient must be linked before alerting can be enabled"`), and
 the last recipient cannot be removed while alerts are on — disable first. Thresholds are
 `#microsoft.graph.percentageCostManagementAlertThreshold` (`value` in %) or
-`#microsoft.graph.absoluteCostManagementAlertThreshold` (`value` + `unit`). A percentage threshold was accepted while
-the policy had a finite `periodLimit` and rejected (`"The supplied alert thresholds are invalid"`) after the period
-limit was set to unlimited — percentages appear to need a finite limit.
+`#microsoft.graph.absoluteCostManagementAlertThreshold` (`value` + `unit`). **Percentage thresholds need a finite
+`periodLimit`**: accepted while the limit was 20 credits, rejected (`"The supplied alert thresholds are invalid"`) once
+it was set to unlimited. Absolute thresholds were accepted.
 
 ## What data you get
 
@@ -151,7 +151,7 @@ What we observed:
 | Redeemed from a separate process, no user present | ✅ 200 on all three reads |
 | Refresh token rotated on every redemption | ✅ yes (new token each time) |
 | Access-token lifetime | 60–90 minutes |
-| Scopes on the unattended token | only the four `CopilotCostManagement…Read.All` scopes, even though the same admin had consented broader scopes (chat, meetings, write) to the Microsoft Graph Command Line Tools app — refresh tokens are per app, so a **dedicated app keeps the stored credential narrow** |
+| Scopes on the unattended token | the four `CopilotCostManagement…Read.All` scopes plus the standard `openid profile email` — nothing else, even though the same admin had consented broader scopes (chat, meetings, write) to the Microsoft Graph Command Line Tools app — refresh tokens are per app, so a **dedicated app keeps the stored credential narrow** |
 | Data freshness seen by the collector | tenant balance `lastModifiedDateTime` about 20 hours behind the time of the call |
 
 Not proven yet: how long the chain survives in practice. By Entra defaults a refresh token stays valid for 90 days
@@ -181,7 +181,7 @@ mode 0600.
 |---|---|
 | `cmapi.py` | Device-code and refresh-token sign-in, and a paced Graph client (one request at a time, `Retry-After` honoured). |
 | `costmgmt_probe.py` | Quick read-only check: `--deep` reads every GET endpoint for the signed-in user and every policy. |
-| `validate_all.py` | The full validation: every GET, then the complete write lifecycle on throwaway objects, then clean-up. Also creates the collector's app registration (`setup-app`). |
+| `validate_all.py` | The full validation: every GET, then the complete write lifecycle on throwaway objects. Clean-up always runs, by tracked id and by name. Also creates the collector's app registration (`setup-app`). |
 | `collector.py` | The unattended collector proof: `bootstrap` once, then `run` from a timer. |
 | `deploy/` | systemd user timer that runs the collector hourly. |
 

@@ -59,15 +59,17 @@ def cmd_login(a):
 
 def cmd_setup_app(a):
     g, c, tenant = session()
-    name = "Copilot cost management collector (test)"
-    found = g.call("GET", f"{GRAPH}/v1.0/applications?$filter=displayName eq '{name}'&$select=id,appId", label="find app")
-    apps = found["body"].get("value", [])
-    if apps:
-        app = apps[0]
-    else:
-        app = g.call("POST", f"{GRAPH}/v1.0/applications", {
-            "displayName": name, "signInAudience": "AzureADMyOrg", "isFallbackPublicClient": True,
-            "publicClient": {"redirectUris": ["http://localhost"]}}, label="create app")["body"]
+    app, stored = None, load(APP)
+    if stored and stored.get("tenant") == tenant:  # reuse only the app this script created, never a name match
+        r = g.call("GET", f"{GRAPH}/v1.0/applications(appId='{stored['client_id']}')?$select=id,appId", label="stored app")
+        app = r["body"] if r["status"] == 200 else None
+    if not app:
+        r = g.call("POST", f"{GRAPH}/v1.0/applications", {
+            "displayName": "Copilot cost management collector (test)", "signInAudience": "AzureADMyOrg",
+            "isFallbackPublicClient": True, "publicClient": {"redirectUris": ["http://localhost"]}}, label="create app")
+        if r["status"] != 201:
+            sys.exit("could not create the app registration")
+        app = r["body"]
     sps = g.call("GET", f"{GRAPH}/v1.0/servicePrincipals?$filter=appId eq '{app['appId']}'&$select=id",
                  label="find SP")["body"].get("value", [])
     sp = sps[0] if sps else g.call("POST", f"{GRAPH}/v1.0/servicePrincipals",
@@ -102,10 +104,10 @@ def cmd_validate(a):
     print("== READ: tenant and existing policies (never modified)")
     g.call("GET", "", label="costManagement root")
     g.call("GET", "/getTenantCreditBalance()")
-    pols = g.call("GET", "/spendingPolicies")
+    policies, _ = g.list_all("/spendingPolicies")
     g.call("GET", "/spendingPolicies?$top=1", label="known issue: $top")
     g.call("GET", "/spendingPolicies?$select=id,displayName,status", label="$select")
-    existing = [p for p in pols["body"].get("value", []) if not p["displayName"].startswith(PREFIX)]
+    existing = [p for p in policies if not p["displayName"].startswith(PREFIX)]
     for p in existing:
         pid = f"/spendingPolicies/{p['id']}"
         g.call("GET", pid)
@@ -131,6 +133,18 @@ def cmd_validate(a):
         g.call("GET", f"/userBalances/{other}/serviceBalances", label="another user")
     g.call("GET", "/userBalances/00000000-0000-0000-0000-000000000001", label="non-existent user")
 
+    started = time.time()
+    try:
+        writes(g, me)
+    finally:
+        print("== CLEAN-UP")
+        cleanup(g, since=started)
+        left, _ = g.list_all("/spendingPolicies", label="final policy list")
+        print("policies now:", [(p["displayName"], p["status"], p.get("@odata.etag")) for p in left])
+        save(g, c)
+
+
+def writes(g, me):
     print("== WRITE: lifecycle on throwaway objects")
     gids = []
     for n in (1, 2):  # two empty groups: the last group of a selected-groups policy cannot be removed
@@ -153,14 +167,13 @@ def cmd_validate(a):
     pol = g.call("POST", "/spendingPolicies", body, label="create policy (no groups)")
     if pol["status"] not in (200, 201):
         print("create failed; nothing else to test on writes")
-        return save(g, c)
+        return
     pid = pol["body"]["id"]
     remember("policies", pid)
     P = f"/spendingPolicies/{pid}"
     # every write below needs If-Match with the policy's ETag; pw() shows the refusal, then retries with it
     pw(g, "PATCH", P, {"displayName": f"{PREFIX} policy patched"}, label="update: rename")
-    pw(g, "PATCH", P, {"perUserLimit": limited(2), "periodLimit": {
-        "@odata.type": "#microsoft.graph.unlimitedCostManagementQuantity", "unit": "copilotCredit"}}, label="update: limits")
+    pw(g, "PATCH", P, {"perUserLimit": limited(2), "periodLimit": limited(20)}, label="update: limits")
     pw(g, "PATCH", P, {"@odata.type": "#microsoft.graph.selectedGroupsSpendingPolicy", "displayName": f"{PREFIX} policy x"},
        label="update with @odata.type (rejected)")
     pw(g, "PATCH", P, {"status": "disabled"}, label="update status (rejected)")
@@ -191,6 +204,10 @@ def cmd_validate(a):
     pw(g, "DELETE", f"{E}/recipients/{me}/$ref", label="remove recipient")
     pw(g, "DELETE", E, label="remove alert settings")
     g.call("GET", E, label="after delete (404)")
+    pw(g, "PATCH", P, {"periodLimit": {"@odata.type": "#microsoft.graph.unlimitedCostManagementQuantity",
+                                       "unit": "copilotCredit"}}, label="update: unlimited period limit")
+    pw(g, "PATCH", E, {"isEnabled": False, "thresholds": [pct(80)]}, label="percentage threshold, unlimited limit (rejected)")
+    pw(g, "DELETE", E, label="remove alert settings if they were created")
 
     A = f"{P}/microsoft.graph.selectedGroupsSpendingPolicy/assignedGroups"
     for gid in gids:
@@ -209,23 +226,35 @@ def cmd_validate(a):
     for gid in gids:
         if g.call("DELETE", f"{GRAPH}/v1.0/groups/{gid}", label="delete test group")["status"] == 204:
             forget("groups", gid)
-    left = g.call("GET", "/spendingPolicies", label="final policy list")
-    print("policies now:", [(p["displayName"], p["status"], p.get("@odata.etag")) for p in left["body"].get("value", [])])
-    save(g, c)
+
+
+def cleanup(g, since=None):
+    """Delete what the tests created: tracked ids, then anything named with PREFIX. A 'Failed create cleanup: ...'
+    policy (left by a failed create) is deleted only if it appeared during this run; otherwise it is reported."""
+    created = load(CREATED, {"groups": [], "policies": []})
+    for pid in list(created["policies"]):
+        if pw(g, "DELETE", f"/spendingPolicies/{pid}", label="clean-up")["status"] in (204, 404):
+            forget("policies", pid)
+    for p in g.list_all("/spendingPolicies", label="clean-up scan")[0]:
+        if p["displayName"].startswith(PREFIX):
+            pw(g, "DELETE", f"/spendingPolicies/{p['id']}", label="clean-up by name")
+        elif p["displayName"].startswith("Failed create cleanup:"):
+            made = datetime.fromisoformat(p["createdDateTime"].replace("Z", "+00:00")).timestamp()
+            if since and made >= since - 60:
+                pw(g, "DELETE", f"/spendingPolicies/{p['id']}", label="clean-up failed create from this run")
+            else:
+                print("NOTE: leftover from an earlier failed create, not deleted:", p["id"], p["status"])
+    for gid in list(created["groups"]):
+        if g.call("DELETE", f"{GRAPH}/v1.0/groups/{gid}", label="clean-up")["status"] in (204, 404):
+            forget("groups", gid)
+    for grp in g.list_all(f"{GRAPH}/v1.0/groups?$filter=startswith(displayName,'{PREFIX} group')&$select=id",
+                          label="clean-up group scan")[0]:
+        g.call("DELETE", f"{GRAPH}/v1.0/groups/{grp['id']}", label="clean-up group by name")
 
 
 def cmd_cleanup(a):
     g, c, _ = session()
-    created = load(CREATED, {"groups": [], "policies": []})
-    for pid in list(created["policies"]):
-        if pw(g, "DELETE", f"/spendingPolicies/{pid}")["status"] in (204, 404):
-            forget("policies", pid)
-    for gid in list(created["groups"]):
-        if g.call("DELETE", f"{GRAPH}/v1.0/groups/{gid}")["status"] in (204, 404):
-            forget("groups", gid)
-    for p in g.call("GET", "/spendingPolicies")["body"].get("value", []):
-        if p["displayName"].startswith(PREFIX):
-            print("leftover test policy:", p["id"], p["displayName"])
+    cleanup(g)
 
 
 def save(g, c):
