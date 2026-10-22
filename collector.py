@@ -8,7 +8,7 @@ The refresh token lives in ~/.cache/costmgmt-collector/token.json (0600), never 
 Each run appends one line to collector-data/runs.jsonl: whether the refresh worked, whether the
 token rotated, how long since the interactive sign-in, and the cost figures read.
 """
-import fcntl, json, os, sys, time
+import contextlib, fcntl, json, os, sys, time
 from datetime import datetime, timezone
 from cmapi import READ_SCOPES, Graph, check_token, device_code, refresh, write_private
 
@@ -38,20 +38,27 @@ def bootstrap():
     if "refresh_token" not in t:
         sys.exit("no refresh token returned; offline_access was not granted")
     c = check_token(t["access_token"], app["tenant"])
-    write_private(TOKEN, {"tenant": app["tenant"], "client_id": app["client_id"],
-                          "refresh_token": t["refresh_token"], "bootstrapped_at": time.time(), "refreshes": 0})
-    print("bootstrapped as", c.get("upn"), "| scopes:", t.get("scope"))
-    run()
+    with locked(block=True):  # wait out a timer run, so it cannot overwrite the new token with a rotated old one
+        write_private(TOKEN, {"tenant": app["tenant"], "client_id": app["client_id"],
+                              "refresh_token": t["refresh_token"], "bootstrapped_at": time.time(), "refreshes": 0})
+        print("bootstrapped as", c.get("upn"), "| scopes:", t.get("scope"))
+        _run()
 
 
-def run():
-    # one run at a time: an overlapping run would redeem the same refresh token and race on the file
+@contextlib.contextmanager
+def locked(block):
+    """One collector at a time: concurrent runs would redeem the same refresh token and race on the file."""
     os.makedirs(os.path.dirname(LOCK), mode=0o700, exist_ok=True)
     with open(LOCK, "w") as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
         except BlockingIOError:
             sys.exit("another collector run is in progress")
+        yield
+
+
+def run():
+    with locked(block=False):
         _run()
 
 

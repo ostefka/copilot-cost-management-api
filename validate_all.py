@@ -62,7 +62,10 @@ def cmd_setup_app(a):
     app, stored = None, load(APP)
     if stored and stored.get("tenant") == tenant:  # reuse only the app this script created, never a name match
         r = g.call("GET", f"{GRAPH}/v1.0/applications(appId='{stored['client_id']}')?$select=id,appId", label="stored app")
-        app = r["body"] if r["status"] == 200 else None
+        if r["status"] == 200:
+            app = r["body"]
+        elif r["status"] != 404:  # a timeout or throttle is not "missing": never create a second registration
+            sys.exit(f"could not look up the stored app (HTTP {r['status']}); app.json left unchanged")
     if not app:
         r = g.call("POST", f"{GRAPH}/v1.0/applications", {
             "displayName": "Copilot cost management collector (test)", "signInAudience": "AzureADMyOrg",
