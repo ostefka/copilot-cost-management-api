@@ -1,0 +1,7 @@
+[Unit]
+Description=Copilot cost collector proof (delegated access kept alive by refresh token)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/code/personal/costmanagementapi
+ExecStart=/usr/bin/python3 -s -E %h/code/personal/costmanagementapi/collector.py run

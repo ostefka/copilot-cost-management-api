@@ -1,0 +1,9 @@
+# raw API responses and logs contain tenant, user and policy ids
+results/
+collector-data/
+*.log
+# the vendor preview guide and source material are not ours to publish
+assets/
+__pycache__/
+.render/
+review/
